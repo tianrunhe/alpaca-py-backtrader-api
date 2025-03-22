@@ -18,6 +18,7 @@ from alpaca.data.live.stock import StockDataStream
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.trading.requests import OrderRequest
+from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest
 from alpaca.common.exceptions import APIError
 import pytz
@@ -91,7 +92,7 @@ class Streamer:
             method: StreamingMethod = StreamingMethod.AccountUpdate,
             base_url='',
             data_url='',
-            data_feed='iex',
+            data_feed=DataFeed.IEX,
             *args,
             **kwargs):
         try:
@@ -316,8 +317,6 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         streamer = Streamer(q,
                             api_key=self.p.key_id,
                             api_secret=self.p.secret_key,
-                            base_url=self.p.base_url,
-                            data_url=os.environ.get("DATA_PROXY_WS", ''),
                             )
 
         streamer.run()
@@ -600,7 +599,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         return response
 
     def streaming_prices(self,
-                         dataname, timeframe, tmout=None, data_feed='iex'):
+                         dataname, timeframe, tmout=None, data_feed=DataFeed.IEX):
         q = queue.Queue()
         kwargs = {'q':         q,
                   'dataname':  dataname,
@@ -627,9 +626,6 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                             api_key=self.p.key_id,
                             api_secret=self.p.secret_key,
                             instrument=dataname,
-                            method=method,
-                            base_url=self.p.base_url,
-                            data_url=os.environ.get("DATA_PROXY_WS", ''),
                             data_feed=data_feed)
 
         streamer.run()
@@ -683,9 +679,6 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                 self.put_notification(e)
                 continue
 
-            if 'code' in accinfo._raw:
-                self.put_notification(accinfo.message)
-                continue
             try:
                 self._cash = float(accinfo.cash)
                 self._value = float(accinfo.portfolio_value)

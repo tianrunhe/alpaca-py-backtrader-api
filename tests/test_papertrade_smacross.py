@@ -4,7 +4,7 @@ import backtrader as bt
 from datetime import datetime
 import logging
 from alpaca_backtrader_api import AlpacaStore
-
+from alpaca.data.enums import DataFeed
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ class TestPaperTradeSmaCrossStrategy(unittest.TestCase):
         data0 = store.getdata(
             dataname='AAPL',
             timeframe=bt.TimeFrame.Days,
-            data_feed='iex'
+            data_feed=DataFeed.IEX
         )
         
         broker = store.getbroker()

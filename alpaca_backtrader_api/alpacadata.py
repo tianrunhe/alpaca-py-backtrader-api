@@ -7,7 +7,7 @@ from backtrader.feed import DataBase
 from backtrader import date2num, num2date
 from backtrader.utils.py3 import queue, with_metaclass
 import backtrader as bt
-
+from alpaca.data.enums import DataFeed
 from alpaca_backtrader_api import alpacastore
 
 
@@ -133,7 +133,7 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
         ('reconnect', True),
         ('reconnections', -1),  # forever
         ('reconntimeout', 5.0),
-        ('data_feed', 'iex'),  # options iex/sip for pro
+        ('data_feed', DataFeed.IEX),  # options iex/sip for pro
     )
 
     _store = alpacastore.AlpacaStore
