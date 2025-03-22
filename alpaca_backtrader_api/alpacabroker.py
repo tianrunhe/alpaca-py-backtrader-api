@@ -79,7 +79,7 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
         """
         positions = collections.defaultdict(Position)
         if self.p.use_positions:
-            broker_positions = self.o.oapi.list_positions()
+            broker_positions = self.o.trading_client.get_all_positions()
             broker_positions_symbols = [p.symbol for p in broker_positions]
             broker_positions_mapped_by_symbol = \
                 {p.symbol: p for p in broker_positions}
@@ -156,7 +156,7 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
         if not datas:
             # don't use self.o.get_value(). it takes time for local store to
             # get update from broker.
-            self.value = float(self.o.oapi.get_account().portfolio_value)
+            self.value = float(self.o.trading_client.get_account().portfolio_value)
             return self.value
         else:
             # let's calculate the value of the positions

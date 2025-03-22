@@ -4,3 +4,4 @@ requests-mock
 coverage>=4.4.1
 mock>=1.0.1
 flake8
+matplotlib==3.2.2

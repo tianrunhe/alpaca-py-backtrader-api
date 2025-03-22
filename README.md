@@ -11,7 +11,7 @@ It allows rapid trading algo development easily, with support for the
 both REST and streaming interfaces. For details of each API behavior,
 please see the online API document.
 
-Note this module supports only python version 3.5 and above, due to
+Note this module supports Python version 3.5 and above, with active development and testing on Python 3.7 through 3.10, due to
 the underlying library `alpaca-trade-api`.
 
 ## Install
@@ -74,6 +74,67 @@ print('Starting Portfolio Value: %.2f' % cerebro.broker.getvalue())
 cerebro.run()
 print('Final Portfolio Value: %.2f' % cerebro.broker.getvalue())
 cerebro.plot()
+```
+
+## Testing
+
+### Unit Tests
+
+To run the tests, use the following command:
+
+```bash
+python setup.py test
+```
+
+Or directly with pytest:
+
+```bash
+pytest
+```
+
+### Integration Tests
+
+Integration tests require Alpaca API credentials. You can run these tests using:
+
+```bash
+ALPACA_API_KEY=<your-key> ALPACA_SECRET_KEY=<your-secret> ./run_integration_tests.sh
+```
+
+See the [tests README](https://github.com/alpacahq/alpaca-backtrader-api/tree/master/tests/README.md) for more information.
+
+## Development
+
+This project supports Python 3.5 and above, with active development and testing on Python 3.7 through 3.10.
+
+### Setting up a development environment
+
+The easiest way to set up a development environment is by using the included setup script:
+
+```bash
+# Clone the repository
+git clone https://github.com/alpacahq/alpaca-backtrader-api.git
+cd alpaca-backtrader-api
+
+# Run the setup script to create a virtual environment with Python 3.10
+./setup_dev_env.sh
+
+# Activate the virtual environment
+source venv/bin/activate
+```
+
+Alternatively, you can manually set up your environment:
+
+```bash
+# Create and activate a virtual environment
+python3.10 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements/requirements.txt
+pip install -r requirements/requirements_test.txt
+
+# Install the package in development mode
+pip install -e .
 ```
 
 ## API Document

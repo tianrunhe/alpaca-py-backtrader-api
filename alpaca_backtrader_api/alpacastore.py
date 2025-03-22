@@ -13,11 +13,14 @@ import exchange_calendars
 import threading
 import asyncio
 
-import alpaca_trade_api as tradeapi
-from alpaca_trade_api.rest import TimeFrame
-from alpaca_trade_api.stream import Stream
+from alpaca.data.timeframe import TimeFrame
+from alpaca.data.live.stock import StockDataStream
+from alpaca.trading.client import TradingClient
+from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.trading.requests import OrderRequest
+from alpaca.data.requests import StockBarsRequest
+from alpaca.common.exceptions import APIError
 import pytz
-import requests
 import pandas as pd
 
 import backtrader as bt
@@ -28,7 +31,7 @@ NY = 'America/New_York'
 
 
 # Extend the exceptions to support extra cases
-class AlpacaError(Exception):
+class AlpacaError(APIError):
     """ Generic error class, catches Alpaca response errors
     """
 
@@ -64,34 +67,6 @@ class AlpacaNetworkError(AlpacaError):
         super(self.__class__, self).__init__(er)
 
 
-class API(tradeapi.REST):
-
-    def _request(self,
-                 method,
-                 path,
-                 data=None,
-                 base_url=None,
-                 api_version=None):
-
-        # Added the try block
-        try:
-            return super(API, self)._request(
-                method, path, data, base_url, api_version)
-        except requests.RequestException as e:
-            resp = AlpacaRequestError().error_response
-            resp['description'] = str(e)
-            return resp
-        except tradeapi.rest.APIError as e:
-            # changed from raise to return
-            return e._error
-        except Exception as e:
-            resp = AlpacaNetworkError().error_response
-            resp['description'] = str(e)
-            return resp
-
-        return None
-
-
 class Granularity(Enum):
     Ticks = "ticks"
     Daily = "day"
@@ -125,18 +100,16 @@ class Streamer:
         except RuntimeError:
             asyncio.set_event_loop(asyncio.new_event_loop())
 
-        self.conn = Stream(api_key,
-                           api_secret,
-                           base_url,
-                           data_stream_url=data_url,
-                           data_feed=data_feed)
+        self.conn = StockDataStream(api_key=api_key,
+                                    secret_key=api_secret,
+                                    feed=data_feed)
         self.instrument = instrument
         self.method = method
         self.q = q
 
     def run(self):
         if self.method == StreamingMethod.AccountUpdate:
-            self.conn.subscribe_trade_updates(self.on_trade)
+            self.conn.subscribe_trades(self.on_trade)
         elif self.method == StreamingMethod.MinuteAgg:
             self.conn.subscribe_bars(self.on_agg_min, self.instrument)
         elif self.method == StreamingMethod.Quote:
@@ -241,10 +214,9 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         else:
             self._oenv = self._ENVLIVE
             self.p.base_url = self._ENV_LIVE_URL
-        self.oapi = API(self.p.key_id,
-                        self.p.secret_key,
-                        self.p.base_url,
-                        self.p.api_version)
+        
+        self.trading_client = TradingClient(api_key=self.p.key_id, secret_key=self.p.secret_key)
+        self.data_client = StockHistoricalDataClient(api_key=self.p.key_id, secret_key=self.p.secret_key)
 
         self._cash = 0.0
         self._value = 0.0
@@ -295,7 +267,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
 
     def get_positions(self):
         try:
-            positions = self.oapi.list_positions()
+            positions = self.trading_client.get_all_positions()
         except (AlpacaError, AlpacaRequestError,):
             return []
         if positions:
@@ -314,7 +286,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
 
     def get_instrument(self, dataname):
         try:
-            insts = self.oapi.get_asset(dataname)
+            insts = self.trading_client.get_asset(dataname)
         except (AlpacaError, AlpacaRequestError,):
             return None
 
@@ -479,18 +451,6 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         5 minute bars e.g) so we need to resample the received bars.
         also, we need to drop out of market records.
         this function does all of that.
-
-        note:
-        this was the old way of getting the data
-          response = self.oapi.get_aggs(dataname,
-                                        compression,
-                                        granularity,
-                                        self.iso_date(start_dt),
-                                        self.iso_date(end_dt))
-          the thing is get_aggs work nicely for days but not for minutes, and
-          it is not a documented API. barset on the other hand does
-          but we need to manipulate it to be able to work with it
-          smoothly
         """
 
         def _granularity_to_timeframe(granularity):
@@ -519,13 +479,35 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             response = pd.DataFrame()
             while not got_all:
                 timeframe = _granularity_to_timeframe(granularity)
-                r = self.oapi.get_bars(dataname,
-                                       timeframe,
-                                       start.isoformat(),
-                                       curr.isoformat())
-                if r:
-                    earliest_sample = r[0].t
-                    response = pd.concat([r.df, response], axis=0)
+                request_params = StockBarsRequest(
+                    symbol_or_symbols=dataname,
+                    timeframe=timeframe,
+                    start=start.isoformat(),
+                    end=curr.isoformat()
+                )
+                r = self.data_client.get_stock_bars(request_params)
+                if r and dataname in r.data and len(r.data[dataname]) > 0:
+                    # BarSet contains a dict with symbol as key and List[Bar] as value
+                    bars = r.data[dataname]
+                    # Extract the earliest timestamp from the first bar
+                    earliest_sample = bars[0].timestamp
+                    
+                    # Convert the bars to a DataFrame
+                    bar_dicts = [{
+                        'open': bar.open,
+                        'high': bar.high,
+                        'low': bar.low,
+                        'close': bar.close,
+                        'volume': bar.volume,
+                        'timestamp': bar.timestamp
+                    } for bar in bars]
+                    
+                    bar_df = pd.DataFrame(bar_dicts)
+                    # Set timestamp as index
+                    bar_df.set_index('timestamp', inplace=True)
+                    
+                    response = pd.concat([bar_df, response], axis=0)
+                    
                     if earliest_sample <= (pytz.timezone(NY).localize(
                             start) if not start.tzname() else start):
                         got_all = True
@@ -580,8 +562,29 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         if not start:
             timeframe = _granularity_to_timeframe(granularity)
             start = end - timedelta(days=1)
-            response = self.oapi.get_bars(dataname,
-                                          timeframe, start, end)._raw
+            request_params = StockBarsRequest(
+                symbol_or_symbols=dataname,
+                timeframe=timeframe,
+                start=start.isoformat(),
+                end=end.isoformat()
+            )
+            r = self.data_client.get_stock_bars(request_params)
+            # Convert BarSet to DataFrame
+            if r and dataname in r.data and len(r.data[dataname]) > 0:
+                bars = r.data[dataname]
+                bar_dicts = [{
+                    'open': bar.open,
+                    'high': bar.high,
+                    'low': bar.low,
+                    'close': bar.close,
+                    'volume': bar.volume,
+                    'timestamp': bar.timestamp
+                } for bar in bars]
+                
+                response = pd.DataFrame(bar_dicts)
+                response.set_index('timestamp', inplace=True)
+            else:
+                response = pd.DataFrame()
         else:
             response = _iterate_api_calls()
         cdl = response
@@ -675,7 +678,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                 pass
 
             try:
-                accinfo = self.oapi.get_account()
+                accinfo = self.trading_client.get_account()
             except Exception as e:
                 self.put_notification(e)
                 continue
@@ -760,7 +763,8 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                     continue
                 oref, okwargs = msg
                 try:
-                    o = self.oapi.submit_order(**okwargs)
+                    order_request = OrderRequest(**okwargs)
+                    o = self.trading_client.submit_order(order_data=order_request)
                 except Exception as e:
                     self.put_notification(e)
                     self.broker._reject(oref)
@@ -811,7 +815,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             if oid is None:
                 continue  # the order is no longer there
             try:
-                self.oapi.cancel_order(oid)
+                self.trading_client.cancel_order(order_id=oid)
             except Exception as e:
                 self.put_notification(
                     "Order not cancelled: {}, {}".format(
