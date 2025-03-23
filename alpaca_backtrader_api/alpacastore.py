@@ -14,13 +14,22 @@ import threading
 import asyncio
 
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.live.websocket import DataStream
 from alpaca.data.live.stock import StockDataStream
+from alpaca.data.live.option import OptionDataStream
+from alpaca.data.live.crypto import CryptoDataStream
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.trading.requests import OrderRequest
+from alpaca.trading.models import Asset
+from alpaca.trading.enums import AssetClass
+from alpaca.trading.stream import TradingStream
 from alpaca.data.enums import DataFeed
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest, OptionBarsRequest
 from alpaca.common.exceptions import APIError
+from pyparsing import Union
 import pytz
 import pandas as pd
 
@@ -81,17 +90,15 @@ class StreamingMethod(Enum):
 
 
 class Streamer:
-    conn = None
+    conn: Union[DataStream, TradingStream] = None
 
     def __init__(
             self,
             q,
+            instrument: Asset = None,
             api_key='',
             api_secret='',
-            instrument='',
             method: StreamingMethod = StreamingMethod.AccountUpdate,
-            base_url='',
-            data_url='',
             data_feed=DataFeed.IEX,
             *args,
             **kwargs):
@@ -101,20 +108,33 @@ class Streamer:
         except RuntimeError:
             asyncio.set_event_loop(asyncio.new_event_loop())
 
-        self.conn = StockDataStream(api_key=api_key,
+        if method == StreamingMethod.AccountUpdate:
+            self.conn = TradingStream(api_key=api_key, secret_key=api_secret)
+        else:
+            if instrument.asset_class == AssetClass.US_EQUITY:
+                self.conn = StockDataStream(api_key=api_key,
                                     secret_key=api_secret,
                                     feed=data_feed)
+            elif instrument.asset_class == AssetClass.US_OPTION:
+                self.conn = OptionDataStream(api_key=api_key,
+                                    secret_key=api_secret,
+                                    feed=data_feed)
+            elif instrument.asset_class == AssetClass.CRYPTO:
+                self.conn = CryptoDataStream(api_key=api_key,
+                                    secret_key=api_secret)
+            else:
+                raise ValueError(f"Unsupported asset class: {instrument.asset_class}")
         self.instrument = instrument
         self.method = method
         self.q = q
 
     def run(self):
         if self.method == StreamingMethod.AccountUpdate:
-            self.conn.subscribe_trades(self.on_trade)
+            self.conn.subscribe_trade_updates(self.on_trade)
         elif self.method == StreamingMethod.MinuteAgg:
-            self.conn.subscribe_bars(self.on_agg_min, self.instrument)
+            self.conn.subscribe_bars(self.on_agg_min, self.instrument.symbol)
         elif self.method == StreamingMethod.Quote:
-            self.conn.subscribe_quotes(self.on_quotes, self.instrument)
+            self.conn.subscribe_quotes(self.on_quotes, self.instrument.symbol)
 
         # this code runs in a new thread. we need to set the loop for it
         loop = asyncio.new_event_loop()
@@ -125,18 +145,89 @@ class Streamer:
         pass
 
     async def on_quotes(self, msg):
-        msg._raw['time'] = msg.timestamp
-        self.q.put(msg._raw)
+        # For Quote objects, we need to handle bid/ask prices that _load_tick expects
+        quote_dict = {
+            # Convert datetime object to pandas Timestamp to match expected format
+            'time': pd.Timestamp(msg.timestamp),
+            'bid_price': msg.bid_price if hasattr(msg, 'bid_price') else msg.close,
+            'ask_price': msg.ask_price if hasattr(msg, 'ask_price') else msg.close,
+            'volume': msg.volume if hasattr(msg, 'volume') else 0
+        }
+        self.q.put(quote_dict)
 
     async def on_agg_min(self, msg):
-        msg._raw['time'] = msg.timestamp
-        self.q.put(msg._raw)
+        # Convert Bar object to a dictionary compatible with alpacadata
+        bar_dict = {
+            # Convert datetime object to pandas Timestamp to match expected format
+            'time': pd.Timestamp(msg.timestamp),
+            'open': msg.open,
+            'high': msg.high,
+            'low': msg.low,
+            'close': msg.close,
+            'volume': msg.volume
+        }
+        self.q.put(bar_dict)
 
     async def on_account(self, msg):
         self.q.put(msg)
 
     async def on_trade(self, msg):
-        self.q.put(msg)
+        # Trade updates have a nested structure where the order is in msg.data.order
+        # Example structure:
+        # {
+        #   "stream": "trade_updates",
+        #   "data": {
+        #     "event": "fill",
+        #     "order": { ... order details ... }
+        #   }
+        # }
+        try:
+            # Try to extract order data from the standard structure
+            if hasattr(msg, 'data') and hasattr(msg.data, 'order'):
+                # New Alpaca SDK format with nested data.order
+                order_dict = {
+                    'id': msg.data.order.id,
+                    'status': msg.data.order.status,
+                    'filled_qty': msg.data.order.filled_qty,
+                    'filled_avg_price': msg.data.order.filled_avg_price,
+                    'side': msg.data.order.side
+                }
+                self.q.put(order_dict)
+            elif isinstance(msg, dict) and 'data' in msg and 'order' in msg['data']:
+                # JSON dictionary format
+                order = msg['data']['order']
+                order_dict = {
+                    'id': order['id'],
+                    'status': order['status'],
+                    'filled_qty': order['filled_qty'],
+                    'filled_avg_price': order['filled_avg_price'],
+                    'side': order['side']
+                }
+                self.q.put(order_dict)
+            elif hasattr(msg, 'order'):
+                # Fallback for older format with direct order attribute
+                order_dict = {
+                    'id': msg.order.id,
+                    'status': msg.order.status,
+                    'filled_qty': msg.order.filled_qty,
+                    'filled_avg_price': msg.order.filled_avg_price,
+                    'side': msg.order.side
+                }
+                self.q.put(order_dict)
+            else:
+                # Direct attributes on the message (unlikely but possible)
+                order_dict = {
+                    'id': msg.id if hasattr(msg, 'id') else None,
+                    'status': msg.status if hasattr(msg, 'status') else None,
+                    'filled_qty': msg.filled_qty if hasattr(msg, 'filled_qty') else 0,
+                    'filled_avg_price': msg.filled_avg_price if hasattr(msg, 'filled_avg_price') else 0,
+                    'side': msg.side if hasattr(msg, 'side') else None
+                }
+                self.q.put(order_dict)
+        except Exception as e:
+            print(f"Error processing trade update: {e}")
+            # Pass the original message as a fallback
+            self.q.put(msg)
 
 
 class MetaSingleton(MetaParams):
@@ -217,7 +308,9 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             self.p.base_url = self._ENV_LIVE_URL
         
         self.trading_client = TradingClient(api_key=self.p.key_id, secret_key=self.p.secret_key)
-        self.data_client = StockHistoricalDataClient(api_key=self.p.key_id, secret_key=self.p.secret_key)
+        self.stock_client = StockHistoricalDataClient(api_key=self.p.key_id, secret_key=self.p.secret_key)
+        self.crypto_client = CryptoHistoricalDataClient(api_key=self.p.key_id, secret_key=self.p.secret_key)
+        self.option_client = OptionHistoricalDataClient(api_key=self.p.key_id, secret_key=self.p.secret_key)
 
         self._cash = 0.0
         self._value = 0.0
@@ -309,7 +402,18 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
     def _t_streaming_listener(self, q, tmout=None):
         while True:
             trans = q.get()
-            self._transaction(trans.order)
+            # Check if trans is already in the expected dictionary format
+            # or if it has the order attribute (old format)
+            if isinstance(trans, dict):
+                self._transaction(trans)
+            elif hasattr(trans, 'order'):
+                self._transaction(trans.order)
+            else:
+                # Try to handle anyway
+                try:
+                    self._transaction(trans)
+                except Exception as e:
+                    print(f"Error processing transaction: {e}")
 
     def _t_streaming_events(self, q, tmout=None):
         if tmout is not None:
@@ -478,13 +582,34 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             response = pd.DataFrame()
             while not got_all:
                 timeframe = _granularity_to_timeframe(granularity)
-                request_params = StockBarsRequest(
-                    symbol_or_symbols=dataname,
-                    timeframe=timeframe,
-                    start=start.isoformat(),
-                    end=curr.isoformat()
-                )
-                r = self.data_client.get_stock_bars(request_params)
+                asset = self.get_instrument(dataname)
+                if asset.asset_class == AssetClass.US_EQUITY:
+                    r = self.stock_client.get_stock_bars(
+                        StockBarsRequest(
+                            symbol_or_symbols=dataname,
+                            timeframe=timeframe,
+                            start=start.isoformat(),
+                            end=curr.isoformat()
+                        )
+                    )
+                elif asset.asset_class == AssetClass.CRYPTO:
+                    r = self.crypto_client.get_crypto_bars(
+                        CryptoBarsRequest(
+                            symbol_or_symbols=dataname,
+                            timeframe=timeframe,
+                            start=start.isoformat(),
+                            end=curr.isoformat()
+                        )
+                    )
+                elif asset.asset_class == AssetClass.US_OPTION:
+                    r = self.option_client.get_option_bars(
+                        OptionBarsRequest(
+                            symbol_or_symbols=dataname,
+                            timeframe=timeframe,
+                            start=start.isoformat(),
+                            end=curr.isoformat()
+                        )
+                    )
                 if r and dataname in r.data and len(r.data[dataname]) > 0:
                     # BarSet contains a dict with symbol as key and List[Bar] as value
                     bars = r.data[dataname]
@@ -561,13 +686,34 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         if not start:
             timeframe = _granularity_to_timeframe(granularity)
             start = end - timedelta(days=1)
-            request_params = StockBarsRequest(
-                symbol_or_symbols=dataname,
-                timeframe=timeframe,
-                start=start.isoformat(),
-                end=end.isoformat()
-            )
-            r = self.data_client.get_stock_bars(request_params)
+            asset = self.get_instrument(dataname)
+            if asset.asset_class == AssetClass.US_EQUITY:
+                r = self.stock_client.get_stock_bars(
+                    StockBarsRequest(
+                        symbol_or_symbols=dataname,
+                        timeframe=timeframe,
+                        start=start.isoformat(),
+                        end=end.isoformat()
+                    )
+                )
+            elif asset.asset_class == AssetClass.CRYPTO:
+                r = self.crypto_client.get_crypto_bars(
+                    CryptoBarsRequest(
+                        symbol_or_symbols=dataname,
+                        timeframe=timeframe,
+                        start=start.isoformat(),
+                        end=end.isoformat()
+                    )
+                )
+            elif asset.asset_class == AssetClass.US_OPTION:
+                r = self.option_client.get_option_bars(
+                    OptionBarsRequest(
+                        symbol_or_symbols=dataname,
+                        timeframe=timeframe,
+                        start=start.isoformat(),
+                        end=end.isoformat()
+                    )
+                )
             # Convert BarSet to DataFrame
             if r and dataname in r.data and len(r.data[dataname]) > 0:
                 bars = r.data[dataname]
@@ -623,9 +769,10 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             method = StreamingMethod.MinuteAgg
 
         streamer = Streamer(q,
+                            instrument=self.get_instrument(dataname),
                             api_key=self.p.key_id,
                             api_secret=self.p.secret_key,
-                            instrument=dataname,
+                            method=method,
                             data_feed=data_feed)
 
         streamer.run()
@@ -690,12 +837,17 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
     def order_create(self, order, stopside=None, takeside=None, **kwargs):
         okwargs = dict()
         # different data feeds may set _name or _dataname so we cover both
-        okwargs['symbol'] = order.data._name if order.data._name else \
-            order.data._dataname
-        okwargs['qty'] = abs(int(order.created.size))
+        symbol = order.data._name if order.data._name else order.data._dataname
+        okwargs['symbol'] = symbol
+        
+        # Always use float for quantities to support fractional orders
+        # for both stocks and cryptocurrencies
+        okwargs['qty'] = abs(float(order.created.size))
+            
         okwargs['side'] = 'buy' if order.isbuy() else 'sell'
         okwargs['type'] = self._ORDEREXECS[order.exectype]
         okwargs['time_in_force'] = "gtc"
+        
         if order.exectype not in [bt.Order.Market, bt.Order.StopTrail,
                                   bt.Order.Stop]:
             okwargs['limit_price'] = str(order.created.price)
@@ -787,6 +939,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                         self._orders[oref + index] = leg.id
                         self._ordersrev[leg.id] = oref + index
                         _check_if_transaction_occurred(leg.id)
+                        index += 1
                 self.broker._submit(oref)  # inside it submits the legs too
                 if okwargs['type'] == 'market':
                     self.broker._accept(oref)  # taken immediately
@@ -828,12 +981,16 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         # Invoked from Streaming Events. May actually receive an event for an
         # oid which has not yet been returned after creating an order. Hence
         # store if not yet seen, else forward to processer
+        try:
+            oid = trans['id']
 
-        oid = trans['id']
-
-        if not self._ordersrev.get(oid, False):
-            self._transpend[oid].append(trans)
-        self._process_transaction(oid, trans)
+            if not self._ordersrev.get(oid, False):
+                self._transpend[oid].append(trans)
+            else:
+                self._process_transaction(oid, trans)
+        except Exception as e:
+            print(f"ERROR processing transaction: {e}")
+            traceback.print_exc()
 
     _X_ORDER_FILLED = ('partially_filled', 'filled',)
 

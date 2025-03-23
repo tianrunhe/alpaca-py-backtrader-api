@@ -15,6 +15,14 @@ class SmaCross(bt.SignalStrategy):
         crossover = bt.ind.CrossOver(sma1, sma2)
         self.signal_add(bt.SIGNAL_LONG, crossover)
     
+    def next(self):
+        dt = self.data.datetime.datetime(0)
+        logger.info('[%s] Data received - Open: %.2f, High: %.2f, Low: %.2f, Close: %.2f, Volume: %.0f' %
+                  (dt.strftime('%Y-%m-%d %H:%M:%S'), 
+                   self.data.open[0], self.data.high[0], 
+                   self.data.low[0], self.data.close[0], 
+                   self.data.volume[0]))
+    
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
             # Buy/Sell order submitted/accepted - Nothing to do
@@ -75,9 +83,8 @@ class TestPaperTradeSmaCrossStrategy(unittest.TestCase):
         
         # Set up the data feed
         data0 = store.getdata(
-            dataname='AAPL',
-            timeframe=bt.TimeFrame.Days,
-            data_feed=DataFeed.IEX
+            dataname='BTC/USD',
+            timeframe=bt.TimeFrame.Minutes
         )
         
         broker = store.getbroker()
@@ -85,6 +92,7 @@ class TestPaperTradeSmaCrossStrategy(unittest.TestCase):
         
         # Add the data feed to the cerebro engine
         cerebro.adddata(data0)
+        cerebro.addsizer(bt.sizers.PercentSizer, percents=10)
         
         # Just check that the broker is accessible and has a value
         initial_value = cerebro.broker.getvalue()
@@ -103,6 +111,7 @@ class TestPaperTradeSmaCrossStrategy(unittest.TestCase):
         # We don't actually run the strategy since that would start 
         # real-time data processing and potentially submit orders
         # This is just a setup test
+        cerebro.run()
 
 if __name__ == '__main__':
     unittest.main() 

@@ -3,6 +3,7 @@ import unittest
 import backtrader as bt
 from datetime import datetime
 import logging
+from alpaca.data.enums import DataFeed
 from alpaca_backtrader_api import AlpacaStore
 
 # Set up logging
@@ -26,11 +27,11 @@ class SmaCross(bt.SignalStrategy):
             dt = self.data.datetime.datetime(0)
             
             if order.isbuy():
-                logger.info('[%s] BUY EXECUTED, Price: %.2f, Size: %.0f, Cost: %.2f, Comm: %.2f' %
+                logger.info('[%s] BUY EXECUTED, Price: %.2f, Size: %.2f, Cost: %.2f, Comm: %.2f' %
                     (dt.strftime('%Y-%m-%d %H:%M:%S'), order.executed.price, order.executed.size, 
                      order.executed.value, order.executed.comm))
             else:  # Sell
-                logger.info('[%s] SELL EXECUTED, Price: %.2f, Size: %.0f, Cost: %.2f, Comm: %.2f' %
+                logger.info('[%s] SELL EXECUTED, Price: %.2f, Size: %.2f, Cost: %.2f, Comm: %.2f' %
                     (dt.strftime('%Y-%m-%d %H:%M:%S'), order.executed.price, order.executed.size, 
                      order.executed.value, order.executed.comm))
         
@@ -76,14 +77,15 @@ class TestSmaCrossStrategy(unittest.TestCase):
         # Set up historical data
         DataFactory = store.getdata
         data0 = DataFactory(
-            dataname='AAPL',
+            dataname='BTC/USD',
             historical=True,
             fromdate=datetime(2022, 1, 1),
             todate=datetime(2022, 12, 31),
-            timeframe=bt.TimeFrame.Minutes,
-            data_feed='iex'
+            timeframe=bt.TimeFrame.Days,
+            data_feed=DataFeed.IEX
         )
         cerebro.adddata(data0)
+        cerebro.addsizer(bt.sizers.PercentSizer, percents=10)
         
         # Run backtest
         initial_value = cerebro.broker.getvalue()
