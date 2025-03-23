@@ -2,7 +2,7 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 import os
 import collections
-import time
+import pytz
 from enum import Enum
 import traceback
 
@@ -31,7 +31,6 @@ from alpaca.trading.stream import TradingStream
 from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest, OptionBarsRequest
 from alpaca.common.exceptions import APIError
-from pyparsing import Union
 import pytz
 import pandas as pd
 
@@ -92,7 +91,7 @@ class StreamingMethod(Enum):
 
 
 class Streamer:
-    conn: Union[DataStream, TradingStream] = None
+    conn: DataStream | TradingStream = None
 
     def __init__(
             self,
@@ -461,8 +460,8 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             q.put(r)
         q.put({})  # end of transmission
 
-    def _make_sure_dates_are_initialized_properly(self, dtbegin, dtend,
-                                                  granularity):
+    def _make_sure_dates_are_initialized_properly(self, dtbegin: pd.Timestamp | None, dtend: pd.Timestamp | None,
+                                                  granularity: Granularity):
         """
         dates may or may not be specified by the user.
         when they do, they are probably don't include NY timezome data
@@ -499,7 +498,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             # if we start the script during market hours we could get this
             # situation. this resolves that.
             dtbegin -= timedelta(days=1)
-        return dtbegin.astimezone(NY), dtend.astimezone(NY)
+        return dtbegin.astimezone(pytz.timezone(NY)), dtend.astimezone(pytz.timezone(NY))
 
     def get_aggs_from_alpaca(self,
                              dataname,
