@@ -7,6 +7,7 @@ from enum import Enum
 import traceback
 
 from datetime import datetime, timedelta, time as dtime
+import uuid
 from dateutil.parser import parse as date_parse
 import time as _time
 import exchange_calendars
@@ -24,6 +25,7 @@ from alpaca.data.historical.crypto import CryptoHistoricalDataClient
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.trading.requests import OrderRequest
 from alpaca.trading.models import Asset
+from alpaca.trading.models import Order
 from alpaca.trading.enums import AssetClass
 from alpaca.trading.stream import TradingStream
 from alpaca.data.enums import DataFeed
@@ -172,58 +174,22 @@ class Streamer:
         self.q.put(msg)
 
     async def on_trade(self, msg):
-        # Trade updates have a nested structure where the order is in msg.data.order
-        # Example structure:
-        # {
-        #   "stream": "trade_updates",
-        #   "data": {
-        #     "event": "fill",
-        #     "order": { ... order details ... }
-        #   }
-        # }
         try:
-            # Try to extract order data from the standard structure
-            if hasattr(msg, 'data') and hasattr(msg.data, 'order'):
-                # New Alpaca SDK format with nested data.order
+            # Extract the order details from the message
+            # The trade update has order as a direct attribute
+            if hasattr(msg, 'order'):
+                order: Order = msg.order
                 order_dict = {
-                    'id': msg.data.order.id,
-                    'status': msg.data.order.status,
-                    'filled_qty': msg.data.order.filled_qty,
-                    'filled_avg_price': msg.data.order.filled_avg_price,
-                    'side': msg.data.order.side
-                }
-                self.q.put(order_dict)
-            elif isinstance(msg, dict) and 'data' in msg and 'order' in msg['data']:
-                # JSON dictionary format
-                order = msg['data']['order']
-                order_dict = {
-                    'id': order['id'],
-                    'status': order['status'],
-                    'filled_qty': order['filled_qty'],
-                    'filled_avg_price': order['filled_avg_price'],
-                    'side': order['side']
-                }
-                self.q.put(order_dict)
-            elif hasattr(msg, 'order'):
-                # Fallback for older format with direct order attribute
-                order_dict = {
-                    'id': msg.order.id,
-                    'status': msg.order.status,
-                    'filled_qty': msg.order.filled_qty,
-                    'filled_avg_price': msg.order.filled_avg_price,
-                    'side': msg.order.side
+                    'id': str(order.id) if isinstance(order.id, uuid.UUID) else order.id,
+                    'status': order.status.value,
+                    'filled_qty': order.filled_qty,
+                    'filled_avg_price': order.filled_avg_price,
+                    'side': order.side.value
                 }
                 self.q.put(order_dict)
             else:
-                # Direct attributes on the message (unlikely but possible)
-                order_dict = {
-                    'id': msg.id if hasattr(msg, 'id') else None,
-                    'status': msg.status if hasattr(msg, 'status') else None,
-                    'filled_qty': msg.filled_qty if hasattr(msg, 'filled_qty') else 0,
-                    'filled_avg_price': msg.filled_avg_price if hasattr(msg, 'filled_avg_price') else 0,
-                    'side': msg.side if hasattr(msg, 'side') else None
-                }
-                self.q.put(order_dict)
+                # Fallback for other message formats
+                self.q.put(msg)
         except Exception as e:
             print(f"Error processing trade update: {e}")
             # Pass the original message as a fallback
@@ -364,10 +330,6 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
             positions = self.trading_client.get_all_positions()
         except (AlpacaError, AlpacaRequestError,):
             return []
-        if positions:
-            if 'code' in positions[0]._raw:
-                return []
-        # poslist = positions.get('positions', [])
         return positions
 
     def get_granularity(self, timeframe, compression) -> Granularity:
@@ -584,6 +546,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                 timeframe = _granularity_to_timeframe(granularity)
                 asset = self.get_instrument(dataname)
                 if asset.asset_class == AssetClass.US_EQUITY:
+                    print(f"Getting stock bars for {dataname} from {start} to {curr}")
                     r = self.stock_client.get_stock_bars(
                         StockBarsRequest(
                             symbol_or_symbols=dataname,

@@ -14,14 +14,7 @@ class SmaCross(bt.SignalStrategy):
         sma1, sma2 = bt.ind.SMA(period=10), bt.ind.SMA(period=30)
         crossover = bt.ind.CrossOver(sma1, sma2)
         self.signal_add(bt.SIGNAL_LONG, crossover)
-    
-    def next(self):
-        dt = self.data.datetime.datetime(0)
-        logger.info('[%s] Data received - Open: %.2f, High: %.2f, Low: %.2f, Close: %.2f, Volume: %.0f' %
-                  (dt.strftime('%Y-%m-%d %H:%M:%S'), 
-                   self.data.open[0], self.data.high[0], 
-                   self.data.low[0], self.data.close[0], 
-                   self.data.volume[0]))
+        self.signal_add(bt.SIGNAL_SHORT, -crossover)  # Negative crossover for short signal
     
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
@@ -34,11 +27,11 @@ class SmaCross(bt.SignalStrategy):
             dt = self.data.datetime.datetime(0)
             
             if order.isbuy():
-                logger.info('[%s] BUY EXECUTED, Price: %.2f, Size: %.0f, Cost: %.2f, Comm: %.2f' %
+                logger.info('[%s] BUY EXECUTED, Price: %.2f, Size: %.4f, Cost: %.2f, Comm: %.2f' %
                     (dt.strftime('%Y-%m-%d %H:%M:%S'), order.executed.price, order.executed.size, 
                      order.executed.value, order.executed.comm))
             else:  # Sell
-                logger.info('[%s] SELL EXECUTED, Price: %.2f, Size: %.0f, Cost: %.2f, Comm: %.2f' %
+                logger.info('[%s] SELL EXECUTED, Price: %.2f, Size: %.4f, Cost: %.2f, Comm: %.2f' %
                     (dt.strftime('%Y-%m-%d %H:%M:%S'), order.executed.price, order.executed.size, 
                      order.executed.value, order.executed.comm))
         

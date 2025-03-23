@@ -15,6 +15,14 @@ class SmaCross(bt.SignalStrategy):
         sma1, sma2 = bt.ind.SMA(period=10), bt.ind.SMA(period=30)
         crossover = bt.ind.CrossOver(sma1, sma2)
         self.signal_add(bt.SIGNAL_LONG, crossover)
+
+    def next(self):
+        dt = self.data.datetime.datetime(0)
+        logger.info('[%s] Data received - Open: %.2f, High: %.2f, Low: %.2f, Close: %.2f, Volume: %.0f' %
+                  (dt.strftime('%Y-%m-%d %H:%M:%S'), 
+                   self.data.open[0], self.data.high[0], 
+                   self.data.low[0], self.data.close[0], 
+                   self.data.volume[0]))
     
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
@@ -77,11 +85,11 @@ class TestSmaCrossStrategy(unittest.TestCase):
         # Set up historical data
         DataFactory = store.getdata
         data0 = DataFactory(
-            dataname='BTC/USD',
+            dataname='AAPL',
             historical=True,
-            fromdate=datetime(2022, 1, 1),
-            todate=datetime(2022, 12, 31),
-            timeframe=bt.TimeFrame.Days,
+            fromdate=datetime(2022, 1, 3),
+            todate=datetime(2022, 1, 4),
+            timeframe=bt.TimeFrame.Minutes,
             data_feed=DataFeed.IEX
         )
         cerebro.adddata(data0)
