@@ -9,6 +9,9 @@ from backtrader.utils.py3 import queue, with_metaclass
 import backtrader as bt
 from alpaca.data.enums import DataFeed
 from alpaca_backtrader_api import alpacastore
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class MetaAlpacaData(DataBase.__class__):
@@ -215,6 +218,7 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
 
     def _st_start(self, instart=True, tmout=None):
         if self.p.historical:
+            logger.debug("Starting historical data download")
             self.put_notification(self.DELAYED)
             dtend = None
             if self.todate < float('inf'):
@@ -232,23 +236,39 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
 
             self._state = self._ST_HISTORBACK
             return True
+
+        # Live data handling
+        logger.debug("Starting live data stream")
         self.qlive = self.o.streaming_prices(self.p.dataname,
                                              self.p.timeframe,
                                              tmout=tmout,
                                              data_feed=self.p.data_feed)
+        
+        # Handle backfill settings for live data
         if instart:
             self._statelivereconn = self.p.backfill_start
+            if self._statelivereconn:
+                logger.debug("Initial backfill enabled")
+                self.put_notification(self.DELAYED)
+            else:
+                logger.debug("Starting pure live mode")
+                self._laststatus = self.LIVE
+                self.put_notification(self.LIVE)
         else:
             self._statelivereconn = self.p.backfill
-
-        if self._statelivereconn:
-            self.put_notification(self.DELAYED)
-
+            if self._statelivereconn:
+                logger.debug("Reconnection backfill enabled")
+                self.put_notification(self.DELAYED)
+            else:
+                logger.debug("Reconnecting in pure live mode")
+                self._laststatus = self.LIVE
+                self.put_notification(self.LIVE)
+        
         self._state = self._ST_LIVE
         if instart:
             self._reconns = self.p.reconnections
 
-        return True  # no return before - implicit continue
+        return True
 
     def stop(self):
         """
@@ -262,6 +282,7 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
 
     def _load(self):
         if self._state == self._ST_OVER:
+            logger.debug("Data feed in OVER state")
             return False
 
         while True:
@@ -271,35 +292,41 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
                            self.qlive.get(timeout=self._qcheck))
                 except queue.Empty:
                     return None  # indicate timeout situation
+
                 if msg is None:  # Conn broken during historical/backfilling
+                    logger.warning("Connection broken during historical/backfilling")
                     self.put_notification(self.CONNBROKEN)
                     # Try to reconnect
                     if not self.p.reconnect or self._reconns == 0:
-                        # Can no longer reconnect
+                        logger.error("Cannot reconnect - no more attempts left")
                         self.put_notification(self.DISCONNECTED)
                         self._state = self._ST_OVER
                         return False  # failed
 
                     self._reconns -= 1
+                    logger.debug(f"Attempting reconnection, attempts left: {self._reconns}")
                     self._st_start(instart=False, tmout=self.p.reconntimeout)
                     continue
 
                 if 'code' in msg:
+                    logger.warning(f"Received error code in message: {msg['code']}")
                     self.put_notification(self.CONNBROKEN)
                     code = msg['code']
                     if code not in [599, 598, 596]:
+                        logger.error(f"Unrecoverable error code: {code}")
                         self.put_notification(self.DISCONNECTED)
                         self._state = self._ST_OVER
                         return False  # failed
 
                     if not self.p.reconnect or self._reconns == 0:
-                        # Can no longer reconnect
+                        logger.error("Cannot reconnect - no more attempts left")
                         self.put_notification(self.DISCONNECTED)
                         self._state = self._ST_OVER
                         return False  # failed
 
                     # Can reconnect
                     self._reconns -= 1
+                    logger.debug(f"Attempting reconnection after error, attempts left: {self._reconns}")
                     self._st_start(instart=False, tmout=self.p.reconntimeout)
                     continue
 
@@ -309,6 +336,7 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
                 if not self._statelivereconn:
                     if self._laststatus != self.LIVE:
                         if self.qlive.qsize() <= 1:  # very short live queue
+                            logger.info("Switching to LIVE status")
                             self.put_notification(self.LIVE)
                     if self.p.timeframe == bt.TimeFrame.Ticks:
                         ret = self._load_tick(msg)
@@ -320,37 +348,8 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
                     if ret:
                         return True
 
-                    # could not load bar ... go and get new one
+                    logger.info("Message not processed, continuing to next message")
                     continue
-
-                # Fall through to processing reconnect - try to backfill
-                self._storedmsg[None] = msg  # keep the msg
-
-                # else do a backfill
-                if self._laststatus != self.DELAYED:
-                    self.put_notification(self.DELAYED)
-
-                dtend = None
-                if len(self) > 1:
-                    # len == 1 ... forwarded for the 1st time
-                    dtbegin = self.datetime.datetime(-1)
-                elif self.fromdate > float('-inf'):
-                    dtbegin = num2date(self.fromdate)
-                else:  # 1st bar and no begin set
-                    # passing None to fetch max possible in 1 request
-                    dtbegin = None
-
-                dtend = pd.Timestamp(msg['time'], unit='ns')
-
-                self.qhist = self.o.candles(
-                    self.p.dataname, dtbegin, dtend,
-                    self._timeframe, self._compression,
-                    candleFormat=self._candleFormat,
-                    includeFirst=self.p.includeFirst)
-
-                self._state = self._ST_HISTORBACK
-                self._statelivereconn = False  # no longer in live
-                continue
 
             elif self._state == self._ST_HISTORBACK:
                 msg = self.qhist.get()
@@ -430,6 +429,7 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
         dtobj = pd.Timestamp(msg['time'], unit='ns')
         dt = date2num(dtobj)
         if dt <= self.lines.datetime[-1]:
+            logger.info("Skipping duplicate timestamp")
             return False  # time already seen
         self.lines.datetime[0] = dt
         self.lines.open[0] = msg['open']
@@ -438,7 +438,6 @@ class AlpacaData(with_metaclass(MetaAlpacaData, DataBase)):
         self.lines.close[0] = msg['close']
         self.lines.volume[0] = msg['volume']
         self.lines.openinterest[0] = 0.0
-
         return True
 
     def _load_history(self, msg):

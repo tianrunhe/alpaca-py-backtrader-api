@@ -2,13 +2,17 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
 import collections
+import logging
 
 from backtrader import BrokerBase, Order, BuyOrder, SellOrder
 from backtrader.utils.py3 import with_metaclass, iteritems
 from backtrader.comminfo import CommInfoBase
 from backtrader.position import Position
+from alpaca.trading.models import Position as AlpacaPosition
 
 from alpaca_backtrader_api import alpacastore
+
+logger = logging.getLogger(__name__)
 
 
 class AlpacaCommInfo(CommInfoBase):
@@ -79,7 +83,7 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
         """
         positions = collections.defaultdict(Position)
         if self.p.use_positions:
-            broker_positions = self.o.trading_client.get_all_positions()
+            broker_positions: list[AlpacaPosition] = self.o.trading_client.get_all_positions()
             broker_positions_symbols = [p.symbol for p in broker_positions]
             broker_positions_mapped_by_symbol = \
                 {p.symbol: p for p in broker_positions}
@@ -189,6 +193,7 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
 
     def _reject(self, oref):
         order = self.orders[oref]
+        logger.warning(f"Rejecting order {oref}: {order.__class__.__name__} - Size: {order.size}, Price: {order.price}, Exectype: {order.exectype}")
         order.reject(self)
         self.notify(order)
         self._bracketize(order, cancel=True)
@@ -203,12 +208,14 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
 
     def _cancel(self, oref):
         order = self.orders[oref]
+        logger.warning(f"Cancelling order {oref}: {order.__class__.__name__} - Size: {order.size}, Price: {order.price}, Exectype: {order.exectype}")
         order.cancel()
         self.notify(order)
         self._bracketize(order, cancel=True)
 
     def _expire(self, oref):
         order = self.orders[oref]
+        logger.warning(f"Expiring order {oref}: {order.__class__.__name__} - Size: {order.size}, Price: {order.price}, Exectype: {order.exectype}")
         order.expire()
         self.notify(order)
         self._bracketize(order, cancel=True)
@@ -226,6 +233,7 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
 
         if not cancel:
             if len(br) == 3:  # all 3 orders in place, parent was filled
+                logger.debug(f"Parent order {pref} filled, activating bracket orders")
                 br = br[1:]  # discard index 0, parent
                 for o in br:
                     o.activate()  # simulate activate for children
@@ -233,15 +241,18 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
 
             elif len(br) == 2:  # filling a children
                 oidx = br.index(order)  # find index to filled (0 or 1)
+                logger.debug(f"Child order {order.ref} filled, cancelling remaining bracket order")
                 self._cancel(br[1 - oidx].ref)  # cancel remaining (1 - 0 -> 1)
         else:
             # Any cancellation cancel the others
+            logger.debug(f"Cancelling all bracket orders for parent {pref}")
             for o in br:
                 if o.alive():
                     self._cancel(o.ref)
 
     def _fill(self, oref, size, price, ttype, **kwargs):
         order = self.orders[oref]
+        logger.debug(f"Filling order {oref}: {order.__class__.__name__} - Size: {size}, Price: {price}, Type: {ttype}")
         data = order.data
         pos = self.getposition(data, clone=False)
         psize, pprice, opened, closed = pos.update(size, price)
@@ -257,9 +268,11 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
                       psize, pprice)
 
         if order.executed.remsize:
+            logger.debug(f"Partial fill for order {oref}: {order.executed.remsize} remaining")
             order.partial()
             self.notify(order)
         else:
+            logger.debug(f"Complete fill for order {oref}")
             order.completed()
             self.notify(order)
             self._bracketize(order)
@@ -273,6 +286,7 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
                 # to order creation. Return the takeside order, to have 3s
                 takeside = order  # alias for clarity
                 parent, stopside = self.opending.pop(pref)
+                logger.info(f"Creating bracket orders - Parent: {parent.ref}, Stop: {stopside.ref}, Take: {takeside.ref}")
                 for o in parent, stopside, takeside:
                     self.orders[o.ref] = o  # write them down
 
@@ -285,6 +299,7 @@ class AlpacaBroker(with_metaclass(MetaAlpacaBroker, BrokerBase)):
                 return self.o.order_create(order)
 
         # Not transmitting
+        logger.debug(f"Order {oref} not being transmitted yet")
         self.opending[pref].append(order)
         return order
 

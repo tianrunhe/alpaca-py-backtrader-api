@@ -23,10 +23,10 @@ from alpaca.trading.client import TradingClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
 from alpaca.data.historical.option import OptionHistoricalDataClient
-from alpaca.trading.requests import OrderRequest
+from alpaca.trading.requests import OrderRequest, LimitOrderRequest, StopOrderRequest, StopLimitOrderRequest, TrailingStopOrderRequest
 from alpaca.trading.models import Asset
 from alpaca.trading.models import Order
-from alpaca.trading.enums import AssetClass
+from alpaca.trading.enums import AssetClass, TimeInForce, OrderSide, OrderType, OrderClass
 from alpaca.trading.stream import TradingStream
 from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest, OptionBarsRequest
@@ -37,6 +37,9 @@ import pandas as pd
 import backtrader as bt
 from backtrader.metabase import MetaParams
 from backtrader.utils.py3 import queue, with_metaclass
+
+import logging
+logger = logging.getLogger(__name__)
 
 NY = 'America/New_York'
 
@@ -158,6 +161,7 @@ class Streamer:
 
     async def on_agg_min(self, msg):
         # Convert Bar object to a dictionary compatible with alpacadata
+        logger.debug(f"Streamer received minute aggregate: {msg}")
         bar_dict = {
             # Convert datetime object to pandas Timestamp to match expected format
             'time': pd.Timestamp(msg.timestamp),
@@ -708,6 +712,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
 
     def streaming_prices(self,
                          dataname, timeframe, tmout=None, data_feed=DataFeed.IEX):
+        logger.debug(f"Starting streaming prices for {dataname} with timeframe {timeframe}")
         q = queue.Queue()
         kwargs = {'q':         q,
                   'dataname':  dataname,
@@ -746,11 +751,11 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
         return self._value
 
     _ORDEREXECS = {
-        bt.Order.Market:    'market',
-        bt.Order.Limit:     'limit',
-        bt.Order.Stop:      'stop',
-        bt.Order.StopLimit: 'stop_limit',
-        bt.Order.StopTrail: 'trailing_stop',
+        bt.Order.Market:    OrderType.MARKET,
+        bt.Order.Limit:     OrderType.LIMIT,
+        bt.Order.Stop:      OrderType.STOP,
+        bt.Order.StopLimit: OrderType.STOP_LIMIT,
+        bt.Order.StopTrail: OrderType.TRAILING_STOP,
     }
 
     def broker_threads(self):
@@ -796,56 +801,74 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
 
             self._evt_acct.set()
 
-    def order_create(self, order, stopside=None, takeside=None, **kwargs):
+    def order_create(self, order: bt.order.Order, stopside=None, takeside=None, **kwargs):
         okwargs = dict()
         # different data feeds may set _name or _dataname so we cover both
         symbol = order.data._name if order.data._name else order.data._dataname
         okwargs['symbol'] = symbol
         
         # Always use float for quantities to support fractional orders
-        # for both stocks and cryptocurrencies
-        okwargs['qty'] = abs(float(order.created.size))
+        # Round to 2 decimal places and convert to string for Alpaca API
+        qty = abs(float(order.created.size))
+        qty = round(qty, 2)  # Round to 2 decimal places
+        okwargs['qty'] = qty
             
-        okwargs['side'] = 'buy' if order.isbuy() else 'sell'
+        okwargs['side'] = OrderSide.BUY if order.isbuy() else OrderSide.SELL
         okwargs['type'] = self._ORDEREXECS[order.exectype]
-        okwargs['time_in_force'] = "gtc"
+        okwargs['time_in_force'] = TimeInForce.DAY
         
-        if order.exectype not in [bt.Order.Market, bt.Order.StopTrail,
-                                  bt.Order.Stop]:
-            okwargs['limit_price'] = str(order.created.price)
-
-        if order.exectype in [bt.Order.StopLimit, bt.Order.Stop]:
-            okwargs['stop_price'] = order.created.pricelimit
-
-        # Not supported in the alpaca api
-        # if order.exectype == bt.Order.StopTrail:
-        #     okwargs['trailingStop'] = order.trailamount
-
-        if stopside:
-            okwargs['stop_loss'] = {'stop_price': stopside.price}
-
-        if takeside:
-            okwargs['take_profit'] = {'limit_price': takeside.price}
-
-        if stopside or takeside:
-            okwargs['order_class'] = "bracket"
-
-        if order.exectype == bt.Order.StopTrail:
+        # Handle different order types and their prices
+        if order.exectype == bt.Order.Market:
+            # Market orders don't need a price
+            logger.debug(f"Creating market order for {symbol} - Side: {okwargs['side']}, Size: {okwargs['qty']}")
+        elif order.exectype == bt.Order.Limit:
+            if order.price is not None:
+                okwargs['limit_price'] = order.price
+                logger.debug(f"Creating limit order for {symbol} - Side: {okwargs['side']}, Size: {okwargs['qty']}, Price: {okwargs['limit_price']}")
+            else:
+                logger.error(f"Limit order for {symbol} has no price!")
+                raise ValueError("Limit orders require a price")
+        elif order.exectype in [bt.Order.StopLimit, bt.Order.Stop]:
+            if order.price is not None:
+                okwargs['stop_price'] = order.price
+                if order.exectype == bt.Order.StopLimit:
+                    if order.created.pricelimit is not None:
+                        okwargs['limit_price'] = order.created.pricelimit
+                    else:
+                        logger.error(f"StopLimit order for {symbol} has no limit price!")
+                        raise ValueError("StopLimit orders require a limit price")
+                logger.debug(f"Creating stop order for {symbol} - Side: {okwargs['side']}, Size: {okwargs['qty']}, Stop: {okwargs['stop_price']}")
+            else:
+                logger.error(f"Stop order for {symbol} has no price!")
+                raise ValueError("Stop orders require a price")
+        elif order.exectype == bt.Order.StopTrail:
             if order.trailpercent and order.trailamount:
-                raise Exception("You can't create trailing stop order with "
-                                "both TrailPrice and TrailPercent. choose one")
+                raise ValueError("You can't create trailing stop order with both TrailPrice and TrailPercent. choose one")
             if order.trailpercent:
                 okwargs['trail_percent'] = order.trailpercent
             elif order.trailamount:
                 okwargs['trail_price'] = order.trailamount
             else:
-                raise Exception("You must provide either trailpercent or "
-                                "trailamount when creating StopTrail order")
+                raise ValueError("You must provide either trailpercent or trailamount when creating StopTrail order")
+            logger.debug(f"Creating trailing stop order for {symbol} - Side: {okwargs['side']}, Size: {okwargs['qty']}")
+
+        if stopside:
+            okwargs['stop_loss'] = {'stop_price': str(stopside.price)}
+            logger.debug(f"Adding stop loss at {stopside.price}")
+
+        if takeside:
+            okwargs['take_profit'] = {'limit_price': str(takeside.price)}
+            logger.debug(f"Adding take profit at {takeside.price}")
+
+        if stopside or takeside:
+            okwargs['order_class'] = "bracket"
+            logger.debug("Creating bracket order")
 
         # anything from the user
         okwargs.update(order.info)
         okwargs.update(**kwargs)
 
+        logger.debug(f"Final order parameters: {okwargs}")
         self.q_ordercreate.put((order.ref, okwargs,))
         return order
 
@@ -870,9 +893,46 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                     continue
                 oref, okwargs = msg
                 try:
-                    order_request = OrderRequest(**okwargs)
+                    logger.debug(f"Submitting order {oref} to Alpaca: {okwargs}")
+                    
+                    order_request: OrderRequest
+                    # Add price parameters based on order type
+                    if order_request.type == OrderType.LIMIT:
+                        order_request = LimitOrderRequest()
+                        order_request.limit_price = okwargs.get('limit_price')
+                    elif order_request.type == OrderType.STOP:
+                        order_request = StopOrderRequest()
+                        order_request.stop_price = okwargs.get('stop_price')
+                    elif order_request.type == OrderType.STOP_LIMIT:
+                        order_request = StopLimitOrderRequest()
+                        order_request.stop_price = okwargs.get('stop_price')
+                        order_request.limit_price = okwargs.get('limit_price')
+                    elif order_request.type == OrderType.TRAILING_STOP:
+                        order_request = TrailingStopOrderRequest()
+                        if 'trail_percent' in okwargs:
+                            order_request.trail_percent = okwargs.get('trail_percent')
+                        elif 'trail_price' in okwargs:
+                            order_request.trail_price = okwargs.get('trail_price')
+                    
+                    # Add bracket order parameters if present
+                    if okwargs.get('order_class') == 'bracket':
+                        order_request.order_class = OrderClass.BRACKET
+                        if 'stop_loss' in okwargs:
+                            order_request.stop_loss = okwargs.get('stop_loss')
+                        if 'take_profit' in okwargs:
+                            order_request.take_profit = okwargs.get('take_profit')
+
+                    order_request.symbol = okwargs.get('symbol')
+                    order_request.qty = okwargs.get('qty')
+                    order_request.side = okwargs.get('side')
+                    order_request.type = okwargs.get('type')
+                    order_request.time_in_force = okwargs.get('time_in_force', 'gtc')
+                    
+                    logger.debug(f"Final order parameters: {order_request}")
                     o = self.trading_client.submit_order(order_data=order_request)
+                    logger.debug(f"Order {oref} submitted successfully: {o}")
                 except Exception as e:
+                    logger.error(f"Error submitting order {oref}: {str(e)}")
                     self.put_notification(e)
                     self.broker._reject(oref)
                     continue

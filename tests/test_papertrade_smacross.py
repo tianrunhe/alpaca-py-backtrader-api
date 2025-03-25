@@ -11,10 +11,47 @@ logger = logging.getLogger(__name__)
 
 class SmaCross(bt.SignalStrategy):
     def __init__(self):
-        sma1, sma2 = bt.ind.SMA(period=10), bt.ind.SMA(period=30)
-        crossover = bt.ind.CrossOver(sma1, sma2)
-        self.signal_add(bt.SIGNAL_LONG, crossover)
-        self.signal_add(bt.SIGNAL_SHORT, -crossover)  # Negative crossover for short signal
+        logger.info("Initializing Test Strategy")
+        self.order = None
+        self.buyprice = None
+        self.buycomm = None
+        self.bar_count = 0
+        self.buy_interval = 2 # Buy every 2 bars
+        self.sell_interval = 1  # Sell after 1 bar
+        
+        # Add position size control
+        self.sizer = bt.sizers.PercentSizer(percents=10)
+        
+        logger.info("Test Strategy initialized")
+
+    def next(self):
+        # Print bar info
+        dt = self.data.datetime.datetime(0)
+        logger.info('[%s] Open: %.2f, High: %.2f, Low: %.2f, Close: %.2f, Volume: %.0f' %
+                 (dt.strftime('%Y-%m-%d %H:%M:%S'), 
+                  self.data.open[0],
+                  self.data.high[0], 
+                  self.data.low[0],
+                  self.data.close[0],
+                  self.data.volume[0]))
+        
+        # If we have a pending order, don't do anything
+        if self.order:
+            return
+            
+        self.bar_count += 1
+        
+        # Check if we are in a position
+        if not self.position:
+            # Buy every buy_interval bars
+            if self.bar_count % self.buy_interval == 0:
+                logger.info(f'BUY CREATE at bar {self.bar_count}')
+                self.order = self.buy()
+        else:
+            # Sell after sell_interval bars
+            if self.bar_count % self.sell_interval == 0:
+                logger.info(f'SELL CREATE at bar {self.bar_count}')
+                self.order = self.sell()
     
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
