@@ -19,9 +19,9 @@ fi
 
 # Run the integration tests
 echo "Running backtest integration test..."
-python -m unittest tests/test_smacross_strategy.py
+python -m unittest tests/test_backtesting.py
 
-echo "Running paper trade setup test..."
-python -m unittest tests/test_papertrade_smacross.py
+echo "Running live trading integration test..."
+python -m unittest tests/test_live_trading.py
 
 echo "Integration tests completed successfully!" 

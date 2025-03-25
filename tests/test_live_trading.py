@@ -9,49 +9,19 @@ from alpaca.data.enums import DataFeed
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class SmaCross(bt.SignalStrategy):
+class TestStrategy(bt.SignalStrategy):
     def __init__(self):
         logger.info("Initializing Test Strategy")
-        self.order = None
-        self.buyprice = None
-        self.buycomm = None
-        self.bar_count = 0
-        self.buy_interval = 2 # Buy every 2 bars
-        self.sell_interval = 1  # Sell after 1 bar
-        
-        # Add position size control
-        self.sizer = bt.sizers.PercentSizer(percents=10)
-        
-        logger.info("Test Strategy initialized")
 
     def next(self):
-        # Print bar info
-        dt = self.data.datetime.datetime(0)
-        logger.info('[%s] Open: %.2f, High: %.2f, Low: %.2f, Close: %.2f, Volume: %.0f' %
-                 (dt.strftime('%Y-%m-%d %H:%M:%S'), 
-                  self.data.open[0],
-                  self.data.high[0], 
-                  self.data.low[0],
-                  self.data.close[0],
-                  self.data.volume[0]))
-        
-        # If we have a pending order, don't do anything
-        if self.order:
-            return
-            
-        self.bar_count += 1
-        
-        # Check if we are in a position
-        if not self.position:
-            # Buy every buy_interval bars
-            if self.bar_count % self.buy_interval == 0:
-                logger.info(f'BUY CREATE at bar {self.bar_count}')
-                self.order = self.buy()
-        else:
-            # Sell after sell_interval bars
-            if self.bar_count % self.sell_interval == 0:
-                logger.info(f'SELL CREATE at bar {self.bar_count}')
-                self.order = self.sell()
+        # Loop over all the data feeds (symbols)
+        for data in self.datas:
+            # Example condition: if current close is above a threshold, buy
+            if not self.getposition(data).size and data.close[0] > data.close[-1]:
+                self.buy(data=data)
+            # Example exit: if price drops below previous bar, sell
+            elif self.getposition(data).size and data.close[0] < data.close[-1]:
+                self.sell(data=data)
     
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
@@ -60,29 +30,32 @@ class SmaCross(bt.SignalStrategy):
 
         # Check if an order has been completed
         if order.status in [order.Completed]:
-            # Get current datetime 
-            dt = self.data.datetime.datetime(0)
+            # Get current datetime and data name
+            dt = order.data.datetime.datetime(0)
+            symbol = order.data._name
             
             if order.isbuy():
-                logger.info('[%s] BUY EXECUTED, Price: %.2f, Size: %.4f, Cost: %.2f, Comm: %.2f' %
-                    (dt.strftime('%Y-%m-%d %H:%M:%S'), order.executed.price, order.executed.size, 
+                logger.info('[%s] %s BUY EXECUTED, Price: %.2f, Size: %.4f, Cost: %.2f, Comm: %.2f' %
+                    (dt.strftime('%Y-%m-%d %H:%M:%S'), symbol, order.executed.price, order.executed.size, 
                      order.executed.value, order.executed.comm))
             else:  # Sell
-                logger.info('[%s] SELL EXECUTED, Price: %.2f, Size: %.4f, Cost: %.2f, Comm: %.2f' %
-                    (dt.strftime('%Y-%m-%d %H:%M:%S'), order.executed.price, order.executed.size, 
+                logger.info('[%s] %s SELL EXECUTED, Price: %.2f, Size: %.4f, Cost: %.2f, Comm: %.2f' %
+                    (dt.strftime('%Y-%m-%d %H:%M:%S'), symbol, order.executed.price, order.executed.size, 
                      order.executed.value, order.executed.comm))
         
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            dt = self.data.datetime.datetime(0)
-            logger.warning('[%s] Order Canceled/Margin/Rejected' % dt.strftime('%Y-%m-%d %H:%M:%S'))
+            dt = order.data.datetime.datetime(0)
+            symbol = order.data._name
+            logger.warning('[%s] %s Order Canceled/Margin/Rejected' % (dt.strftime('%Y-%m-%d %H:%M:%S'), symbol))
 
     def notify_trade(self, trade):
         if not trade.isclosed:
             return
 
-        dt = self.data.datetime.datetime(0)
-        logger.info('[%s] TRADE CLOSED, Profit: %.2f, Gross: %.2f, Net: %.2f' %
-                 (dt.strftime('%Y-%m-%d %H:%M:%S'), trade.pnl, trade.pnlcomm, trade.pnlcomm - trade.commission))
+        dt = trade.data.datetime.datetime(0)
+        symbol = trade.data._name
+        logger.info('[%s] %s TRADE CLOSED, Profit: %.2f, Gross: %.2f, Net: %.2f' %
+                 (dt.strftime('%Y-%m-%d %H:%M:%S'), symbol, trade.pnl, trade.pnlcomm, trade.pnlcomm - trade.commission))
 
 class TestPaperTradeSmaCrossStrategy(unittest.TestCase):
     
@@ -96,7 +69,7 @@ class TestPaperTradeSmaCrossStrategy(unittest.TestCase):
     def test_paper_setup(self):
         """Test setting up a SMA Cross strategy for paper trading"""
         cerebro = bt.Cerebro()
-        cerebro.addstrategy(SmaCross)
+        cerebro.addstrategy(TestStrategy)
         
         # Add analyzers for when we run the strategy
         cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
@@ -111,17 +84,24 @@ class TestPaperTradeSmaCrossStrategy(unittest.TestCase):
             paper=True  # Use paper trading account
         )
         
-        # Set up the data feed
-        data0 = store.getdata(
-            dataname='BTC/USD',
-            timeframe=bt.TimeFrame.Minutes
-        )
-        
+        # Set up the broker
         broker = store.getbroker()
         cerebro.setbroker(broker)
         
-        # Add the data feed to the cerebro engine
-        cerebro.adddata(data0)
+        # Set up multiple data feeds
+        # symbols = ['AAPL', 'GOOG', 'MSFT', 'TSLA', 'NVDA', 'AMZN', 'META']
+        symbols = ['AAPL']
+
+        for i, symbol in enumerate(symbols):
+            data = store.getdata(
+                dataname=symbol,
+                timeframe=bt.TimeFrame.Minutes,
+                # Set a unique name for each data feed
+                name=symbol
+            )
+            # Add the data feed to the cerebro engine
+            cerebro.adddata(data)
+        
         cerebro.addsizer(bt.sizers.PercentSizer, percents=10)
         
         # Just check that the broker is accessible and has a value
