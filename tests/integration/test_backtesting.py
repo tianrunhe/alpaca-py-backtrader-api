@@ -1,157 +1,150 @@
 import os
-import unittest
+import pytest
 import backtrader as bt
 from datetime import datetime
-import logging
 from alpaca.data.enums import DataFeed
 from alpaca_backtrader_api import AlpacaStore
+import pytz
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-class SmaCross(bt.SignalStrategy):
+class BuyAndHoldStrategy(bt.Strategy):
+    """A strategy that buys at market open and sells at market close."""
+    
     def __init__(self):
-        sma1, sma2 = bt.ind.SMA(period=10), bt.ind.SMA(period=30)
-        crossover = bt.ind.CrossOver(sma1, sma2)
-        self.signal_add(bt.SIGNAL_LONG, crossover)
-
+        self.order = None
+        self.buy_price = None
+        self.shares = 10  # Fixed number of shares to buy
+        
     def next(self):
-        dt = self.data.datetime.datetime(0)
-        logger.info('[%s] Data received - Open: %.2f, High: %.2f, Low: %.2f, Close: %.2f, Volume: %.0f' %
-                  (dt.strftime('%Y-%m-%d %H:%M:%S'), 
-                   self.data.open[0], self.data.high[0], 
-                   self.data.low[0], self.data.close[0], 
-                   self.data.volume[0]))
+        # Get current bar's datetime in NY timezone
+        current_dt = self.data.datetime.datetime(0)
+
+        # Buy at market open
+        if not self.position and current_dt.hour == 9:
+            self.order = self.buy(size=self.shares)
+            print(f'BUY CREATE at {current_dt}, Price: {self.data.close[0]:.2f}, Size: {self.shares}')
+        
+        # Sell at market close
+        elif self.position and current_dt.hour == 15:
+            self.order = self.sell(size=self.shares)
+            print(f'SELL CREATE at {current_dt}, Price: {self.data.close[0]:.2f}, Size: {self.shares}')
     
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
-            # Buy/Sell order submitted/accepted - Nothing to do
             return
 
-        # Check if an order has been completed
         if order.status in [order.Completed]:
-            # Get current datetime 
-            dt = self.data.datetime.datetime(0)
-            
             if order.isbuy():
-                logger.info('[%s] BUY EXECUTED, Price: %.2f, Size: %.2f, Cost: %.2f, Comm: %.2f' %
-                    (dt.strftime('%Y-%m-%d %H:%M:%S'), order.executed.price, order.executed.size, 
-                     order.executed.value, order.executed.comm))
+                self.buy_price = order.executed.price
+                print(f'BUY EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}')
             else:  # Sell
-                logger.info('[%s] SELL EXECUTED, Price: %.2f, Size: %.2f, Cost: %.2f, Comm: %.2f' %
-                    (dt.strftime('%Y-%m-%d %H:%M:%S'), order.executed.price, order.executed.size, 
-                     order.executed.value, order.executed.comm))
+                print(f'SELL EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}')
         
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            dt = self.data.datetime.datetime(0)
-            logger.warning('[%s] Order Canceled/Margin/Rejected' % dt.strftime('%Y-%m-%d %H:%M:%S'))
+            print('Order Canceled/Margin/Rejected')
 
     def notify_trade(self, trade):
         if not trade.isclosed:
             return
 
-        dt = self.data.datetime.datetime(0)
-        logger.info('[%s] TRADE CLOSED, Profit: %.2f, Gross: %.2f, Net: %.2f' %
-                 (dt.strftime('%Y-%m-%d %H:%M:%S'), trade.pnl, trade.pnlcomm, trade.pnlcomm - trade.commission))
+        print(f'TRADE PROFIT, Gross: {trade.pnl:.2f}, Net: {trade.pnlcomm:.2f}')
 
-class TestSmaCrossStrategy(unittest.TestCase):
+@pytest.fixture
+def api_credentials():
+    """Fixture to provide API credentials and skip if not available"""
+    api_key = os.environ.get('ALPACA_API_KEY', '')
+    api_secret = os.environ.get('ALPACA_SECRET_KEY', '')
+    if not api_key or not api_secret:
+        pytest.skip('ALPACA_API_KEY and ALPACA_SECRET_KEY not set in environment')
+    return api_key, api_secret
+
+def test_backtest_buy_and_hold(api_credentials, capsys):
+    """Test strategy that buys at market open and sells at market close"""
+    api_key, api_secret = api_credentials
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(BuyAndHoldStrategy)
     
-    def setUp(self):
-        # Skip test if API keys are not set
-        self.api_key = os.environ.get('ALPACA_API_KEY', '')
-        self.api_secret = os.environ.get('ALPACA_SECRET_KEY', '')
-        if not self.api_key or not self.api_secret:
-            self.skipTest('ALPACA_API_KEY and ALPACA_SECRET_KEY not set in environment')
-            
-    def test_backtest_smacross(self):
-        """Test SMA Cross strategy in backtest mode"""
-        cerebro = bt.Cerebro()
-        cerebro.addstrategy(SmaCross)
-        
-        # Add analyzers
-        cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
-        cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
-        cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
-        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
-        
-        # Initialize store with the API credentials
-        store = AlpacaStore(
-            key_id=self.api_key,
-            secret_key=self.api_secret,
-            paper=True  # Use paper trading account
-        )
-        
-        # Set up historical data
-        DataFactory = store.getdata
-        data0 = DataFactory(
-            dataname='AAPL',
-            historical=True,
-            fromdate=datetime(2022, 1, 3),
-            todate=datetime(2022, 1, 4),
-            timeframe=bt.TimeFrame.Minutes,
-            data_feed=DataFeed.IEX
-        )
-        cerebro.adddata(data0)
-        cerebro.addsizer(bt.sizers.PercentSizer, percents=10)
-        
-        # Run backtest
-        initial_value = cerebro.broker.getvalue()
-        results = cerebro.run()
-        final_value = cerebro.broker.getvalue()
-        
-        # Extract and log strategy results
-        strat = results[0]
-        
-        # Print analyzers results - handle possible None values
-        sharpe_ratio = strat.analyzers.sharpe.get_analysis()
-        if 'sharperatio' in sharpe_ratio and sharpe_ratio['sharperatio'] is not None:
-            logger.info('Sharpe Ratio: %.2f' % sharpe_ratio['sharperatio'])
-        else:
-            logger.info('Sharpe Ratio: N/A')
-        
-        drawdown = strat.analyzers.drawdown.get_analysis()
-        if 'max' in drawdown and 'drawdown' in drawdown['max']:
-            logger.info('Max Drawdown: %.2f%%' % drawdown['max']['drawdown'])
-        else:
-            logger.info('Max Drawdown: N/A')
-        
-        returns = strat.analyzers.returns.get_analysis()
-        if 'ravg' in returns and returns['ravg'] is not None:
-            logger.info('Annual Return: %.2f%%' % (returns['ravg'] * 100))
-        else:
-            logger.info('Annual Return: N/A')
-        
-        # Log trade statistics with safer access
-        trade_analysis = strat.analyzers.trades.get_analysis()
-        logger.info('------ Trade Statistics ------')
-        total_trades = trade_analysis.get('total', {}).get('total', 0)
-        winning_trades = trade_analysis.get('won', {}).get('total', 0)
-        losing_trades = trade_analysis.get('lost', {}).get('total', 0)
-        
-        logger.info('Total Trades: %d' % total_trades)
-        logger.info('Winning Trades: %d' % winning_trades)
-        logger.info('Losing Trades: %d' % losing_trades)
-        
-        if winning_trades > 0:
-            avg_win = trade_analysis.get('won', {}).get('pnl', {}).get('average', 0)
-            logger.info('Average Profit on Winning Trades: %.2f' % avg_win)
-        
-        if losing_trades > 0:
-            avg_loss = trade_analysis.get('lost', {}).get('pnl', {}).get('average', 0)
-            logger.info('Average Loss on Losing Trades: %.2f' % avg_loss)
-        
-        # Check that we can run the strategy without errors
-        # We don't check for specific returns as they depend on market data and strategy behavior
-        self.assertIsNotNone(final_value)
-        
-        # Simple test that verifies the strategy ran
-        print(f'Initial Portfolio Value: {initial_value:.2f}')
-        print(f'Final Portfolio Value: {final_value:.2f}')
-        print(f'Return: {((final_value / initial_value) - 1) * 100:.2f}%')
-        
-        # If plotting is needed during development:
-        # cerebro.plot() # Uncomment for visual inspection
-
-if __name__ == '__main__':
-    unittest.main() 
+    # Add analyzers
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+    cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
+    
+    # Initialize store with the API credentials
+    store = AlpacaStore(
+        key_id=api_key,
+        secret_key=api_secret,
+        paper=True  # Use paper trading account
+    )
+    
+    # Set up historical data with precise NY timezone times
+    ny_tz = pytz.timezone('America/New_York')
+    fromdate = ny_tz.localize(datetime(2025, 1, 2))
+    todate = ny_tz.localize(datetime(2025, 1, 3))
+    
+    DataFactory = store.getdata
+    data0 = DataFactory(
+        dataname='AAPL',
+        historical=True,
+        fromdate=fromdate,
+        todate=todate,
+        timeframe=bt.TimeFrame.Minutes,
+        data_feed=DataFeed.IEX
+    )
+    cerebro.adddata(data0)
+    
+    # Set initial cash
+    cerebro.broker.setcash(100000.0)
+    
+    # Run backtest
+    initial_value = cerebro.broker.getvalue()
+    results = cerebro.run()
+    final_value = cerebro.broker.getvalue()
+    
+    # Extract strategy and analyzer results
+    strat = results[0]
+    trade_analysis = strat.analyzers.trades.get_analysis()
+    
+    # Test 1: Data Loading
+    # Verify we have data points
+    assert len(data0) > 0, "No data points loaded"
+    
+    # Test 2: Order Processing
+    # Verify we have exactly one complete trade (buy-sell cycle)
+    total_trades = trade_analysis.get('total', {}).get('total', 0)
+    assert total_trades == 1, f"Expected exactly 1 complete trade, got {total_trades}"
+    
+    # Test 3: Position Management
+    # Verify we have no position at the end (since we sold)
+    assert strat.position.size == 0, "Position should be closed at the end of backtest"
+    
+    # Test 4: Portfolio Value
+    # Verify portfolio value is not None and less than initial value (since we know AAPL closed lower)
+    assert final_value is not None, "Final portfolio value is None"
+    assert final_value < initial_value, "Final portfolio value should be less than initial value"
+    
+    # Test 5: Trade Analysis
+    # We expect:
+    # - One complete trade (buy-sell cycle)
+    # - No open trades (since we sold)
+    # - One lost trade (since AAPL closed lower)
+    # - No won trades
+    assert trade_analysis.get('total', {}).get('total', 0) == 1, "Expected exactly one complete trade"
+    assert trade_analysis.get('total', {}).get('open', 0) == 0, "Expected no open trades"
+    assert trade_analysis.get('won', {}).get('total', 0) == 0, "Expected no won trades"
+    assert trade_analysis.get('lost', {}).get('total', 0) == 1, "Expected one lost trade"
+    
+    # Log results for debugging
+    print('------ Test Results ------')
+    print(f'Initial Portfolio Value: {initial_value:.2f}')
+    print(f'Final Portfolio Value: {final_value:.2f}')
+    print(f'Total Return: {((final_value / initial_value) - 1) * 100:.2f}%')
+    
+    # Log trade details
+    if strat.buy_price:
+        print(f'Buy Price: {strat.buy_price:.2f}')
+        print(f'Final Price: {data0.close[0]:.2f}')
+        print(f'Position Size: {strat.position.size}')
+        print(f'Position Value: {strat.position.size * data0.close[0]:.2f}')
+    
+    # If plotting is needed during development:
+    # cerebro.plot() # Uncomment for visual inspection 

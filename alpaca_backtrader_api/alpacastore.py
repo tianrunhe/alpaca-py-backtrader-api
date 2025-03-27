@@ -485,7 +485,7 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
               not dtend.tzname() else dtend
         if granularity == Granularity.Minute:
             calendar = exchange_calendars.get_calendar(name='NYSE')
-            while not calendar.is_open_on_minute(dtend.ceil(freq='T')):
+            while not calendar.is_open_on_minute(dtend.ceil(freq='min')):
                 dtend = dtend.replace(hour=15,
                                       minute=59,
                                       second=0,
@@ -549,7 +549,6 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                 timeframe = _granularity_to_timeframe(granularity)
                 asset = self.get_instrument(dataname)
                 if asset.asset_class == AssetClass.US_EQUITY:
-                    print(f"Getting stock bars for {dataname} from {start} to {curr}")
                     r = self.stock_client.get_stock_bars(
                         StockBarsRequest(
                             symbol_or_symbols=dataname,
