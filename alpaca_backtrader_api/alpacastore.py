@@ -23,7 +23,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
 from alpaca.data.historical.option import OptionHistoricalDataClient
-from alpaca.trading.requests import OrderRequest, LimitOrderRequest, StopOrderRequest, StopLimitOrderRequest, TrailingStopOrderRequest
+from alpaca.trading.requests import LimitOrderRequest, StopOrderRequest, StopLimitOrderRequest, TrailingStopOrderRequest, MarketOrderRequest
 from alpaca.trading.models import Asset
 from alpaca.trading.models import Order
 from alpaca.trading.enums import AssetClass, TimeInForce, OrderSide, OrderType, OrderClass
@@ -803,19 +803,20 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
 
     def order_create(self, order: bt.order.Order, stopside=None, takeside=None, **kwargs):
         okwargs = dict()
-        # different data feeds may set _name or _dataname so we cover both
         symbol = order.data._name if order.data._name else order.data._dataname
         okwargs['symbol'] = symbol
         
-        # Always use float for quantities to support fractional orders
-        # Round to 2 decimal places and convert to string for Alpaca API
         qty = abs(float(order.created.size))
-        qty = round(qty, 2)  # Round to 2 decimal places
+        qty = round(qty, 2)
         okwargs['qty'] = qty
             
         okwargs['side'] = OrderSide.BUY if order.isbuy() else OrderSide.SELL
         okwargs['type'] = self._ORDEREXECS[order.exectype]
-        okwargs['time_in_force'] = TimeInForce.DAY
+        
+        # Get asset class first to determine correct time_in_force
+        asset = self.trading_client.get_asset(symbol)
+        # For Crypto Trading, Alpaca only supports gtc, and ioc (https://alpaca.markets/docs/api-references/trading-api/orders/#time-in-force)
+        okwargs['time_in_force'] = TimeInForce.GTC if asset.asset_class == AssetClass.CRYPTO else TimeInForce.DAY
         
         # Handle different order types and their prices
         if order.exectype == bt.Order.Market:
@@ -895,24 +896,41 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                 try:
                     logger.debug(f"Submitting order {oref} to Alpaca: {okwargs}")
                     
-                    order_request: OrderRequest
-                    # Add price parameters based on order type
-                    if order_request.type == OrderType.LIMIT:
-                        order_request = LimitOrderRequest()
-                        order_request.limit_price = okwargs.get('limit_price')
-                    elif order_request.type == OrderType.STOP:
-                        order_request = StopOrderRequest()
-                        order_request.stop_price = okwargs.get('stop_price')
-                    elif order_request.type == OrderType.STOP_LIMIT:
-                        order_request = StopLimitOrderRequest()
-                        order_request.stop_price = okwargs.get('stop_price')
-                        order_request.limit_price = okwargs.get('limit_price')
-                    elif order_request.type == OrderType.TRAILING_STOP:
-                        order_request = TrailingStopOrderRequest()
+                    # Initialize order request based on order type
+                    basic_order_data = {
+                        "symbol": okwargs.get('symbol'),
+                        "qty": okwargs.get('qty'),
+                        "side": okwargs.get('side'),
+                        "time_in_force": okwargs.get('time_in_force')
+                    }
+                    order_type = okwargs.get('type')
+
+                    if order_type == OrderType.LIMIT:
+                        order_request = LimitOrderRequest(
+                            **basic_order_data,
+                            limit_price=okwargs.get('limit_price')
+                        )
+                    elif order_type == OrderType.STOP:
+                        order_request = StopOrderRequest(
+                            **basic_order_data,
+                            stop_price=okwargs.get('stop_price')
+                        )
+                    elif order_type == OrderType.STOP_LIMIT:
+                        order_request = StopLimitOrderRequest(
+                            **basic_order_data,
+                            stop_price=okwargs.get('stop_price'),
+                            limit_price=okwargs.get('limit_price')
+                        )
+                    elif order_type == OrderType.TRAILING_STOP:
+                        order_request = TrailingStopOrderRequest(
+                            **basic_order_data,
+                        )
                         if 'trail_percent' in okwargs:
                             order_request.trail_percent = okwargs.get('trail_percent')
                         elif 'trail_price' in okwargs:
                             order_request.trail_price = okwargs.get('trail_price')
+                    else:
+                        order_request = MarketOrderRequest(**basic_order_data)
                     
                     # Add bracket order parameters if present
                     if okwargs.get('order_class') == 'bracket':
@@ -922,12 +940,6 @@ class AlpacaStore(with_metaclass(MetaSingleton, object)):
                         if 'take_profit' in okwargs:
                             order_request.take_profit = okwargs.get('take_profit')
 
-                    order_request.symbol = okwargs.get('symbol')
-                    order_request.qty = okwargs.get('qty')
-                    order_request.side = okwargs.get('side')
-                    order_request.type = okwargs.get('type')
-                    order_request.time_in_force = okwargs.get('time_in_force', 'gtc')
-                    
                     logger.debug(f"Final order parameters: {order_request}")
                     o = self.trading_client.submit_order(order_data=order_request)
                     logger.debug(f"Order {oref} submitted successfully: {o}")

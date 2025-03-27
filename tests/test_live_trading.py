@@ -6,16 +6,25 @@ import logging
 from alpaca_backtrader_api import AlpacaStore
 from alpaca.data.enums import DataFeed
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+# Set various loggers to INFO level
+logging.getLogger('websockets.client').setLevel(logging.INFO)
+logging.getLogger('urllib3.connectionpool').setLevel(logging.INFO)
+logging.getLogger('asyncio').setLevel(logging.INFO)
 
 class TestStrategy(bt.SignalStrategy):
     def __init__(self):
         logger.info("Initializing Test Strategy")
+        logger.info(f"Number of data feeds: {len(self.datas)}")
+        for i, data in enumerate(self.datas):
+            logger.info(f"Data feed {i}: {data._name}")
+        super(TestStrategy, self).__init__()
 
     def next(self):
         # Loop over all the data feeds (symbols)
         for data in self.datas:
+            logger.info(f"Processing data for {data._name}. Now: {data.close[0]} Previous: {data.close[-1]}")
             # Example condition: if current close is above a threshold, buy
             if not self.getposition(data).size and data.close[0] > data.close[-1]:
                 self.buy(data=data)
@@ -90,14 +99,17 @@ class TestPaperTradeSmaCrossStrategy(unittest.TestCase):
         
         # Set up multiple data feeds
         # symbols = ['AAPL', 'GOOG', 'MSFT', 'TSLA', 'NVDA', 'AMZN', 'META']
-        symbols = ['AAPL']
+        symbols = ['BTC/USD']
 
         for i, symbol in enumerate(symbols):
             data = store.getdata(
                 dataname=symbol,
                 timeframe=bt.TimeFrame.Minutes,
                 # Set a unique name for each data feed
-                name=symbol
+                name=symbol,
+                backfill_start=False,
+                backfill=False,
+                historical=False,
             )
             # Add the data feed to the cerebro engine
             cerebro.adddata(data)
